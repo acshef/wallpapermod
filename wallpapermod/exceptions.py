@@ -8,3 +8,7 @@ class WallpapermodError(Exception):
 class PostResultError(WallpapermodError):
     def __init__(self, postresult: PostResult):
         self.postresult = postresult
+
+
+class WrongSubredditError(WallpapermodError):
+    pass

@@ -4,13 +4,14 @@ import requests
 
 
 class Imgur:
-    def __init__(self, config: dict, session: requests.Session = None):
-        self.config = config
+    def __init__(self, client_id: str, session: requests.Session = None):
+        self.client_id = client_id
+        # self.client_secret = client_secret
         self.session = session or requests.Session()
 
     @property
     def headers(self) -> dict[str, str]:
-        return {"Authorization": f"Client-ID {self.config['imgur']['client_id']}"}
+        return {"Authorization": f"Client-ID {self.client_id}"}
 
     def get_image_urls(self, url: str) -> t.Union[str, list[str]]:
         if match := re.fullmatch(r".*?/a/([a-z0-9]+)(?:\.[a-z0-9]+)?", url, re.IGNORECASE):

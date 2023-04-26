@@ -1,26 +1,34 @@
-import logging, sys
+import logging, pathlib
 
+from .config import Config
 from .const import *
 from .database import *
 
 
 if __name__ == "__main__":
+    config = Config.create()
+    if config.print_config:
+        config.print()
+        exit()
+
     from wallpapermod import App
 
     logging.basicConfig(format="%(asctime)s - %(levelname)-8s - %(message)s", level=logging.INFO)
     log = logging.getLogger()
 
-    app = App(log)
+    app = App(config, log)
 
-    DB.configure(DB_NAME)
-    log.info(f"Dropping and recreating database {DB_NAME!r}")
-    drop_all()
-    create_all()
+    DB.configure(config.database)
+    db_filepath = pathlib.Path(config.database)
+    if not db_filepath.parent.exists():
+        db_filepath.parent.mkdir(parents=True, exist_ok=True)
+    if config.drop:
+        log.info(f"Dropping and recreating database {config.database!r}")
+        drop_all()
+        create_all()
 
-    _, *args = list(sys.argv)
-
-    if len(args):
-        app.run_single(args[0])
+    if config.posts:
+        app.run_specific(*config.posts)
         exit()
 
-    app.run(limit=1000)
+    app.run(praw_limit=1000)

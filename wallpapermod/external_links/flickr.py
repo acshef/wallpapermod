@@ -4,8 +4,8 @@ import requests
 
 
 class Flickr:
-    def __init__(self, config: dict, session: requests.Session = None):
-        self.config = config
+    def __init__(self, key: str, session: requests.Session = None):
+        self.key = key
         self.session = session or requests.Session()
 
     def get_image_urls(self, url: str) -> t.Union[str, list[str]]:
@@ -17,7 +17,7 @@ class Flickr:
     def _get_single_image_url(self, photo_id: str) -> str:
         params = {
             "method": "flickr.photos.getSizes",
-            "api_key": self.config["flickr"]["key"],
+            "api_key": self.key,
             "photo_id": photo_id,
             "format": "json",
             "nojsoncallback": 1,

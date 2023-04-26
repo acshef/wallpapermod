@@ -1,15 +1,14 @@
-import datetime, logging, os.path, sys, typing as t
+import datetime, logging, sys, typing as t
 
 import praw
 import bs4
 from PIL import Image as PImage, UnidentifiedImageError
 import requests
-import yaml
 
-from .config import CONFIG_SCHEMA
+from .config import Config
 from .const import *
 from .database import DB, Submission, Image
-from .exceptions import PostResultError
+from .exceptions import *
 from .external_links.imgur import Imgur
 from .external_links.flickr import Flickr
 from .logging_ import PrefixAdapter
@@ -17,53 +16,27 @@ from .responses import RESPONSES
 from .util import count
 
 
-if t.TYPE_CHECKING:
-    from _typeshed import FileDescriptorOrPath
-
-
 __version__ = "0.1.0"
 
 
-class _BaseApp:
-    def __init__(self, log: logging.Logger):
-        self.config = self.read_config()
+class App:
+    def __init__(self, config: Config, log: logging.Logger):
+        self.config = config
         self.log = log
         self.session = requests.Session()
         user_agent = f"script:{APP_NAME}:v{__version__} (Python {sys.version})"
         self.session.headers.update({"User-Agent": user_agent})
         self.log.info("Initializing connection to reddit")
-        self.reddit = self.make_praw(self.config, self.session)
-        self.subreddit: praw.reddit.Subreddit = self.reddit.subreddit(self.config["subreddit"])
+        self.reddit = self.make_praw(
+            self.config.reddit_username,
+            self.config.reddit_password,
+            self.config.reddit_client_id,
+            self.config.reddit_client_secret,
+            self.session,
+            **self.config.praw_config or {},
+        )
+        self.subreddit: praw.reddit.Subreddit = self.reddit.subreddit(self.config.subreddit)
         self.log.info(f"Reddit initialized read-only={self.reddit.read_only}")
-
-    @staticmethod
-    def read_config(file: t.Union["FileDescriptorOrPath", None] = None) -> dict:
-        if file is None:
-            for path in DEFAULT_CONFIG_PATHS:
-                if os.path.isfile(path):
-                    file = path
-                    break
-            else:
-                raise ValueError(
-                    f"Config path must be provided or default config file must exist, one of {DEFAULT_CONFIG_PATHS!r}"
-                )
-
-        with open(file, "rb") as fd:
-            obj = yaml.safe_load(fd)
-            return CONFIG_SCHEMA(obj)
-
-    @staticmethod
-    def make_praw(config: dict, session: requests.Session) -> praw.Reddit:
-        praw_config = config["praw"]
-        requestor_kwargs = praw_config.setdefault("requestor_kwargs", {})
-        requestor_kwargs["session"] = session
-        praw_config.setdefault("user_agent", session.headers["User-Agent"])
-        return praw.Reddit(**praw_config)
-
-
-class App(_BaseApp):
-    def __init__(self, log: logging.Logger):
-        super().__init__(log)
         self.rezzes = self.get_rezzes()
 
     def get_rezzes(self) -> list[Resolution]:
@@ -102,23 +75,39 @@ class App(_BaseApp):
 
         return rezzes
 
-    def run(self, *, limit: t.Optional[int] = None):
+    def run(self, *, praw_limit: t.Optional[int] = None):
         self.log.info("Beginning retrieval of posts")
         try:
-            for post in self.subreddit.new(limit=limit):
+            for post in self.subreddit.new(limit=praw_limit):
                 self.check_submission(post)
         except KeyboardInterrupt:
             print("Aborted!")
 
-    def run_single(self, post_id: str):
-        self.log.info(f"Retrieving post {post_id!r}")
-        post = self.reddit.submission(id=post_id)
-        self.check_submission(post)
+    def run_specific(self, *post_ids: list[str]):
+        if not post_ids:
+            self.log.warning("No post IDs to check")
+            return
+        if len(post_ids) == 1:
+            self.log.info("Will only check post with this ID: " + post_ids[0])
+        else:
+            self.log.info("Will only check posts with these IDs: " + ", ".join(post_ids))
+        for post_id in post_ids:
+            log = PrefixAdapter(self.log, f"{post_id:<7} -")
+            log.info("Retrieving post")
+            try:
+                post = self.reddit.submission(id=post_id)
+                if post.subreddit.display_name != self.config.subreddit:
+                    raise WrongSubredditError(
+                        f"Post {post_id} is from /r/{post.subreddit.display_name}, expected /r/{self.config.subreddit}"
+                    )
+            except Exception as exc:
+                log.error(str(exc))
+            else:
+                self.check_submission(post)
 
     def check_submission(self, post: praw.reddit.Submission):
-        log = PrefixAdapter(self.log, f"{post.id} -")
+        log = PrefixAdapter(self.log, f"{post.id:<7} -")
 
-        self.log.info("")
         submission = Submission.from_post(post)
         dt_submitted = submission.dateSubmitted.astimezone().replace(tzinfo=None)
         log.info(f"Title: {submission.title!r}")
@@ -242,11 +231,11 @@ class App(_BaseApp):
             # This is a single image
             return ImageURLCollection(post.url)
         elif post.domain in ("imgur.com",):
-            imgur = Imgur(self.config, self.session)
+            imgur = Imgur(self.config.imgur_client_id, self.session)
             urls = imgur.get_image_urls(post.url.strip())
             return ImageURLCollection(urls, "Imgur")
         elif post.domain in ("flickr.com",):
-            flickr = Flickr(self.config, self.session)
+            flickr = Flickr(self.config.flickr_key, self.session)
             urls = flickr.get_image_urls(post.url.strip())
             return ImageURLCollection(urls, "Flickr")
         else:
@@ -286,3 +275,24 @@ class App(_BaseApp):
             self.log.debug(f"Image ({image.x}×{image.y}) matches title resolution")
 
         return image
+
+    @staticmethod
+    def make_praw(
+        username: str,
+        password: str,
+        client_id: str,
+        client_secret: str,
+        session: requests.Session,
+        **kwargs,
+    ) -> praw.Reddit:
+        config = dict(kwargs)
+        config.update(
+            username=username,
+            password=password,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        requestor_kwargs = config.setdefault("requestor_kwargs", {})
+        requestor_kwargs["session"] = session
+        config.setdefault("user_agent", session.headers["User-Agent"])
+        return praw.Reddit(**config)
