@@ -164,7 +164,7 @@ class App:
             if not len(good_submission_rezzes):
                 raise PostResultError(PostResult.UNSUPPORTED_RES)
 
-            image_urls, special_type = self.get_image_urls(post)
+            image_urls, special_type = self.get_image_urls(post, log)
 
             rezzes_str = ", ".join(f"{x}×{y}" for x, y in submission.res)
             log.info(f"Resolution (title): {rezzes_str}")
@@ -174,7 +174,7 @@ class App:
                     logmsg += f" ({special_type})"
                 log.info(logmsg)
                 submission.type = PostType.IMAGE
-                self.check_image(submission, image_urls)
+                self.check_image(submission, image_urls, log)
             else:
                 logmsg = "Gallery submission"
                 if special_type:
@@ -183,7 +183,7 @@ class App:
                 log.info(logmsg)
                 submission.type = PostType.GALLERY
                 for image_url in image_urls:
-                    self.check_image(submission, image_url)
+                    self.check_image(submission, image_url, log)
         except PostResultError as exc:
             submission.result = exc.postresult
             submission.type = PostType.UNKNOWN
@@ -261,14 +261,31 @@ class App:
             if any(r in self.rezzes for r in res_variants):
                 yield (w, h)
 
-    def get_image_urls(self, post: praw.reddit.Submission) -> ImageURLCollection:
+    def get_image_urls(
+        self, post: praw.reddit.Submission, log: logging.Logger = None
+    ) -> ImageURLCollection:
+        if log is None:
+            log = self.log
+
+        if hasattr(post, "crosspost_parent"):
+            _parent_kind, parent_id = post.crosspost_parent.split("_")
+            parent = self.reddit.submission(parent_id)
+            parent._fetch()
+            return self.get_image_urls(parent, log)
+
         if vars(post).get("is_gallery"):
             # This is a gallery post
             gallery_items = [i["media_id"] for i in post.gallery_data["items"]]
-            return ImageURLCollection(
-                [post.media_metadata[item]["s"]["u"] for item in gallery_items]
-            )
-        elif vars(post).get("post_hint") == "image":
+            gallery_urls = list[str]()
+            for item in gallery_items:
+                media_item = post.media_metadata[item]
+                media_item_status = media_item.get("status")
+                if media_item_status != "valid":
+                    log.warn(f"Media item {item!r} has status {media_item_status!r}")
+                    continue
+                gallery_urls.append(media_item["s"]["u"])
+            return ImageURLCollection(gallery_urls)
+        elif vars(post).get("post_hint") == "image" or vars(post).get("domain") == "i.redd.it":
             # This is a single image
             return ImageURLCollection(post.url)
         elif post.domain in ("imgur.com",):
@@ -283,7 +300,12 @@ class App:
             breakpoint()
             raise PostResultError(PostResult.UNSUPPORTED_TYPE_OR_LINK)
 
-    def check_image(self, submission: Submission, image_url: str) -> Image:
+    def check_image(
+        self, submission: Submission, image_url: str, log: logging.Logger = None
+    ) -> Image:
+        if log is None:
+            log = self.log
+
         image = Image(postID=submission.postID, url=image_url)
         submission.images.append(image)
         image_resp = self.session.get(image_url, stream=True)
@@ -291,29 +313,32 @@ class App:
             pimage = PImage.open(image_resp.raw, formats=SUPPORTED_FORMATS)
         except UnidentifiedImageError:
             image.result = ImageResult.UNSUPPORTED_MEDIA_TYPE
-            self.log.warning(f"Unsupported MimeType {image_resp.headers['Content-Type']!r}")
+            log.warning(f"Unsupported MimeType {image_resp.headers['Content-Type']!r}")
             return image
 
         image.x = pimage.width
         image.y = pimage.height
         image.format = pimage.format
         image.result = ImageResult.VALID
-        self.log.info(f"Resolution ({pimage.format} image): {pimage.width}×{pimage.height}")
+        log.info(f"Resolution ({pimage.format} image): {pimage.width}×{pimage.height}")
 
-        good_rezzes = list(self.good_rezzes(submission))
+        good_rezzes = set(self.good_rezzes(submission))
         # Oh no, we're going to have a mismatch of some sort
         if (image.x, image.y) not in good_rezzes:
             # Image needs to be at least as big (in both dimensions) as ONE of the resolutions in the post title
+            satisfied = False
             for x, y in good_rezzes:
-                if image.x < x or image.y < y:
-                    self.log.debug(f"Image ({image.x}×{image.y}) is smaller than title's ({x}×{y})")
-                    image.result = ImageResult.SMALLER
-                    break
-                self.log.debug(f"Image ({image.x}×{image.y}) at least as big as title's ({x}×{y})")
-            else:
+                if image.x >= x and image.y >= y:
+                    log.debug(f"Image ({image.x}×{image.y}) at least as big as title's ({x}×{y})")
+                    satisfied = True
+                else:
+                    log.debug(f"Image ({image.x}×{image.y}) is smaller than title's ({x}×{y})")
+            if satisfied > 0:
                 image.result = ImageResult.LARGER
+            else:
+                image.result = ImageResult.SMALLER
         else:
-            self.log.debug(f"Image ({image.x}×{image.y}) matches title resolution")
+            log.debug(f"Image ({image.x}×{image.y}) matches title resolution")
 
         return image
 
