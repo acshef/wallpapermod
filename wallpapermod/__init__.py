@@ -12,7 +12,7 @@ from .exceptions import *
 from .external_links.imgur import Imgur
 from .external_links.flickr import Flickr
 from .logging_ import PrefixAdapter
-from .responses import RESPONSES
+from .responses import make_response
 from .util import count
 
 
@@ -181,27 +181,33 @@ class App:
         else:
             color = "🟥"
 
+        self.respond(submission)
         log.info(f"{color} {submission.result.value}")
 
         DB.add(submission)
         DB.commit()
 
     def respond(self, submission: Submission):
+        response_text = make_response(submission)
+        if response_text is None:
+            # Don't do anything for any other results (i.e. VALID or unsupported things)
+            return
+
         if submission.result in (
             PostResult.NO_RESOLUTION,
             PostResult.UNSUPPORTED_RES,
             PostResult.SMALLER,
         ):
-            response_text = RESPONSES[submission.result]
             # Add a comment, distinguish comment, sticky comment, remove the post
+            # submission.removed = True
             pass
         if submission.result is PostResult.LARGER:
-            response_text = RESPONSES[submission.result]
             # Add a comment, distinguish comment, sticky comment
             pass
 
-        # Don't do anything for any other results (i.e. VALID or unsupported things)
-        return
+        # TODO: Swap this out for a permalink of the stickied comment
+        # once commenting has been implemented
+        submission.response = response_text
 
     def good_rezzes(self, submission: Submission) -> t.Iterator[Resolution]:
         """
