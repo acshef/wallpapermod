@@ -26,6 +26,7 @@ class Submission(Base):
     postID = Column(Text, nullable=False)
     title = Column(Text, nullable=False)
     author = Column(Text, nullable=True)  # Null if author was deleted
+    permalink = Column(Text, nullable=False)
     res: list[tuple[int, int]] = Column(Rezzes, nullable=False)  # AxB[,CxD]
     dateSubmitted = Column(DateTime, nullable=False)
     dateProcessed = Column(DateTime, nullable=False)
@@ -68,6 +69,7 @@ class Submission(Base):
             postID=post.id,
             title=post.title.strip(),
             author=post.author.name if post.author is not None else None,
+            permalink=post.permalink,
             dateSubmitted=datetime.datetime.fromtimestamp(post.created_utc, datetime.timezone.utc),
             domain=post.domain,
         )
