@@ -75,15 +75,50 @@ class App:
 
         return rezzes
 
-    def run(self, *, praw_limit: t.Optional[int] = None):
-        self.log.info("Beginning retrieval of posts")
-        try:
-            for post in self.subreddit.new(limit=praw_limit):
-                self.check_submission(post)
-        except KeyboardInterrupt:
-            print("Aborted!")
+    def run(self):
+        if self.config.posts:
+            self._run_specific(*self.config.posts)
+            return
 
-    def run_specific(self, *post_ids: list[str]):
+        self._run_loop()
+        return
+
+    def _run_loop(self):
+        msg: str
+        if self.config.count:
+            msg = f"Beginning retrieval of {count(self.config.count, 'post')}"
+        else:
+            msg = "Beginning maximum retrieval of posts"
+
+        if self.config.stop_after:
+            if isinstance(self.config.stop_after, str):
+                msg += f", stopping after post {self.config.stop_after!r}"
+            elif isinstance(self.config.stop_after, datetime.datetime):
+                msg += f", stopping after {self.config.stop_after}"
+            else:
+                raise ValueError(f"Unknown stop-after value {self.config.stop_after!r}")
+
+        self.log.info(msg)
+
+        for i, post in enumerate(self.subreddit.new(limit=None)):
+            if self.config.count and i >= self.config.count:
+                break
+            if isinstance(self.config.stop_after, datetime.datetime):
+                # Break if the post submission time is less than the config
+                if post.created <= self.config.stop_after.timestamp():
+                    break
+            self.check_submission(post)
+            if isinstance(self.config.stop_after, str):
+                # Break if the post ID matches config
+                if post.id == self.config.stop_after:
+                    break
+
+        if self.config.count:
+            self.log.info(f"Finished retrieving {count(self.config.count, 'post')}")
+
+        return
+
+    def _run_specific(self, *post_ids: list[str]):
         if not post_ids:
             self.log.warning("No post IDs to check")
             return

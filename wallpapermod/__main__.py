@@ -6,29 +6,30 @@ from .database import *
 
 
 if __name__ == "__main__":
-    config = Config.create()
-    if config.print_config:
-        config.print()
-        exit()
+    try:
+        config = Config.create()
+        if config.print_config:
+            config.print()
+            exit()
 
-    from wallpapermod import App
+        from wallpapermod import App
 
-    logging.basicConfig(format="%(asctime)s - %(levelname)-8s - %(message)s", level=logging.INFO)
-    log = logging.getLogger()
+        logging.basicConfig(
+            format="%(asctime)s - %(levelname)-8s - %(message)s", level=logging.INFO
+        )
+        log = logging.getLogger()
 
-    app = App(config, log)
+        app = App(config, log)
 
-    DB.configure(config.database)
-    db_filepath = pathlib.Path(config.database)
-    if not db_filepath.parent.exists():
-        db_filepath.parent.mkdir(parents=True, exist_ok=True)
-    if config.drop:
-        log.info(f"Dropping and recreating database {config.database!r}")
-        drop_all()
-        create_all()
+        DB.configure(config.database)
+        db_filepath = pathlib.Path(config.database)
+        if not db_filepath.parent.exists():
+            db_filepath.parent.mkdir(parents=True, exist_ok=True)
+        if config.drop:
+            log.info(f"Dropping and recreating database {config.database!r}")
+            drop_all()
+            create_all()
 
-    if config.posts:
-        app.run_specific(*config.posts)
-        exit()
-
-    app.run(praw_limit=1000)
+        app.run()
+    except KeyboardInterrupt:
+        print("Aborted!")

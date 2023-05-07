@@ -1,4 +1,4 @@
-import argparse, json, os, pathlib, re
+import argparse, datetime, json, os, pathlib, re
 
 import configargparse
 
@@ -49,7 +49,7 @@ def config_path(path: str) -> pathlib.Path:
     return relative_path(path)
 
 
-def subreddit(name: str) -> str:
+def _subreddit(name: str) -> str:
     return re.sub(r"^/?r/", "", name)
 
 
@@ -66,10 +66,53 @@ class _maskedstr(str):
         return "********"
 
 
+def _postid_or_datetime(value: str) -> t.Union[str, datetime.datetime]:
+    value = value.strip()
+
+    match = re.fullmatch(
+        r"""
+        (\d{4})         # First group: YYYY year
+        \s*[-_]\s*
+        (\d{1,2})       # Second group: MM month
+        \s*[-_]\s*
+        (\d{1,2})       # Third group: DD day
+        (?:
+            \s+
+            (\d{1,2})   # Fourth group: H[H] hour
+            \s*[-_:]\s*
+            (\d{2})     # Fifth group: MM minute
+            (?:
+                \s*[-_:]\s*
+                (\d{2}) # Sixth group: SS seconds
+            )? # Optional seconds
+        )? # Optional time
+    """,
+        value,
+        re.VERBOSE | re.IGNORECASE,
+    )
+
+    if match:
+        return datetime.datetime(
+            int(match[1]),
+            int(match[2]),
+            int(match[3]),
+            int(match[4] or 0),
+            int(match[5] or 0),
+            int(match[6] or 0),
+        )
+
+    match = re.fullmatch(r"[a-z0-9]+", value, re.IGNORECASE)
+    if match:
+        return value
+
+    raise ValueError(f"{value!r} doesn't look like a timestamp or a post ID")
+
+
 class Config(argparse.Namespace):
     subreddit: str
     posts: list[str]
     count: t.Optional[int] = None
+    stop_after: t.Optional[t.Union[str, datetime.datetime]] = None
 
     reddit_username: str
     reddit_password: str
@@ -129,9 +172,17 @@ class Config(argparse.Namespace):
             "--count", "-n", type=int, required=False, help="Stop after the Nth post", metavar="N"
         )
         parser.add_argument(
+            "--stop-after",
+            "-l",
+            type=_postid_or_datetime,
+            required=False,
+            help="Stop after a specific post ID or timestamp (YYYY-MM-DD [HH:MM[:SS]])",
+            metavar="ID_OR_DATE",
+        )
+        parser.add_argument(
             "--subreddit",
             "-r",
-            type=subreddit,
+            type=_subreddit,
             required=True,
             help="Subreddit to operate upon",
         )
