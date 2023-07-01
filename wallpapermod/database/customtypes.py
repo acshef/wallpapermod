@@ -3,13 +3,15 @@ import enum, typing as t
 from sqlalchemy import Enum as SAEnum
 import sqlalchemy.types as types
 
+from wallpapermod.const import *
+
 
 class Rezzes(types.TypeDecorator):
     impl = types.String
 
     cache_ok = True
 
-    def process_bind_param(self, value: list[tuple[int, int]], dialect):
+    def process_bind_param(self, value: list[Resolution], dialect):
         rezzes = list[str]()
         for x, y, *_ in value:
             rezzes.append(f"{x}x{y}")
@@ -17,7 +19,7 @@ class Rezzes(types.TypeDecorator):
         return ",".join(rezzes)
 
     def process_result_value(self, value: str, dialect):
-        rezzes = list[tuple[int, int]]()
+        rezzes = list[Resolution]()
         for res_str in str(value).split(","):
             x, y, *_ = res_str.split("x")
             rezzes.append((int(x), int(y)))

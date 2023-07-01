@@ -15,7 +15,7 @@ from sqlalchemy.orm import relationship
 
 from .base import Base
 from .customtypes import Rezzes, ValueEnum
-from wallpapermod.const import PostType, PostResult, ImageResult
+from wallpapermod.const import *
 
 
 class Submission(Base):
@@ -27,7 +27,7 @@ class Submission(Base):
     title = Column(Text, nullable=False)
     author = Column(Text, nullable=True)  # Null if author was deleted
     permalink = Column(Text, nullable=False)
-    res: list[tuple[int, int]] = Column(Rezzes, nullable=False)  # AxB[,CxD]
+    res: list[Resolution] = Column(Rezzes, nullable=False)  # AxB[,CxD]
     dateSubmitted = Column(DateTime, nullable=False)
     dateProcessed = Column(DateTime, nullable=False)
     domain = Column(Text, nullable=False)
