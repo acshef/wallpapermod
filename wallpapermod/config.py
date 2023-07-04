@@ -31,25 +31,25 @@ class ArgumentDefaultsHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
         return help
 
 
-def relative_path(path: t.Union[str, pathlib.Path]) -> str:
+def _relative_path(path: t.Union[str, pathlib.Path]) -> str:
     abs_path = pathlib.Path(path).resolve()
     abs_cwd = pathlib.Path(os.getcwd()).resolve()
     return str(pathlib.Path(pathlib.PurePath(abs_path).relative_to(abs_cwd)))
 
 
-def config_path(path: str) -> pathlib.Path:
+def _config_path(path: str) -> pathlib.Path:
     if isinstance(path, _defaultconfigstr):
         for dp_name in DEFAULT_CONFIG_PATHS:
             dp = pathlib.Path(dp_name)
             if dp.exists() and dp.is_file():
-                return relative_path(dp)
+                return _relative_path(dp)
         raise ValueError(
             f"Config file is required; no default config files exist ({DEFAULT_CONFIG_PATHS})"
         )
-    return relative_path(path)
+    return _relative_path(path)
 
 
-def _subreddit(name: str) -> str:
+def _subredditstr(name: str) -> str:
     return re.sub(r"^/?r/", "", name)
 
 
@@ -71,18 +71,20 @@ def _postid_or_datetime(value: str) -> t.Union[str, datetime.datetime]:
 
     match = re.fullmatch(
         r"""
-        (\d{4})         # First group: YYYY year
-        \s*[-_]\s*
+        (?:             # Optional year
+            (\d{4})     # First group: YYYY year
+            \s*[-_/.,]\s*
+        )?
         (\d{1,2})       # Second group: MM month
-        \s*[-_]\s*
+        \s*[-_/.,]\s*
         (\d{1,2})       # Third group: DD day
         (?:
-            \s+
+            [\s,]\s*         # Mandatory separator between date and time
             (\d{1,2})   # Fourth group: H[H] hour
-            \s*[-_:]\s*
+            \s*[-_:.,]\s*
             (\d{2})     # Fifth group: MM minute
             (?:
-                \s*[-_:]\s*
+                \s*[-_:.,]\s*
                 (\d{2}) # Sixth group: SS seconds
             )? # Optional seconds
         )? # Optional time
@@ -93,7 +95,7 @@ def _postid_or_datetime(value: str) -> t.Union[str, datetime.datetime]:
 
     if match:
         return datetime.datetime(
-            int(match[1]),
+            int(match[1] or datetime.datetime.now().year),
             int(match[2]),
             int(match[3]),
             int(match[4] or 0),
@@ -108,11 +110,20 @@ def _postid_or_datetime(value: str) -> t.Union[str, datetime.datetime]:
     raise ValueError(f"{value!r} doesn't look like a timestamp or a post ID")
 
 
+def _logging_config(value: str) -> dict:
+    cfg: dict = json.loads(value)
+    cfg.setdefault("version", 1)
+
+    return cfg
+
+
 class Config(argparse.Namespace):
     subreddit: str
     posts: list[str]
+    color: bool
     count: t.Optional[int] = None
     stop_after: t.Optional[t.Union[str, datetime.datetime]] = None
+    verbose: int
 
     reddit_username: str
     reddit_password: str
@@ -121,35 +132,26 @@ class Config(argparse.Namespace):
     praw_config: dict
 
     flickr_key: str
-    # flickr_secret: str
 
     imgur_client_id: str
-    # imgur_client_secret: str
 
-    database: pathlib.Path
+    database: str
     drop: bool
-
-    print_config: bool
-
-    def print(self):
-        configdict = vars(self)
-        longestklen = max(len(k) for k in configdict.keys())
-        for k, v in configdict.items():
-            print(f"{k:<{longestklen}} = {v!r}")
 
     @classmethod
     def create(cls) -> t.Self:
-        parser = cls._create_parser()
+        parser = cls.create_parser()
         return parser.parse_args(namespace=cls())
 
     @staticmethod
-    def _create_parser() -> configargparse.ArgumentParser:
+    def create_parser() -> configargparse.ArgumentParser:
         from wallpapermod import __version__
 
         parser = configargparse.ArgumentParser(
             prog=APP_NAME,
             description="A moderator for the subreddit /r/wallpaper <https://www.reddit.com/r/wallpaper> that validates image sizes",
             formatter_class=ArgumentDefaultsHelpFormatter,
+            config_file_parser_class=configargparse.YAMLConfigFileParser,
             add_help=False,
         )
         parser.add_argument(
@@ -164,8 +166,20 @@ class Config(argparse.Namespace):
             is_config_file=True,
             default=_defaultconfigstr(DEFAULT_CONFIG_PATHS),
             help="Config file",
-            type=config_path,
+            type=_config_path,
             metavar="FILEPATH",
+        )
+        parser.add_argument(
+            "--verbose",
+            "-v",
+            action="count",
+            default=0,
+        )
+        parser.add_argument(
+            "--no-color",
+            action="store_false",
+            dest="color",
+            help="Disable colored text output",
         )
 
         parser.add_argument(
@@ -173,22 +187,22 @@ class Config(argparse.Namespace):
         )
         parser.add_argument(
             "--stop-after",
-            "-l",
+            "-s",
             type=_postid_or_datetime,
             required=False,
-            help="Stop after a specific post ID or timestamp (YYYY-MM-DD [HH:MM[:SS]])",
+            help="Stop after a specific post ID (a1b2c3d4) or timestamp (YYYY-MM-DD [HH:MM[:SS]])",
             metavar="ID_OR_DATE",
         )
         parser.add_argument(
             "--subreddit",
             "-r",
-            type=_subreddit,
+            type=_subredditstr,
             required=True,
             help="Subreddit to operate upon",
         )
 
         reddit_group = parser.add_argument_group(
-            "Reddit",
+            "reddit",
             "For interfacing with Reddit API <https://www.reddit.com/prefs/apps#developed-apps>",
         )
         reddit_group.add_argument(
@@ -230,7 +244,7 @@ class Config(argparse.Namespace):
         )
 
         flickr_grp = parser.add_argument_group(
-            "Flickr", "For interfacing with Flickr API <https://www.flickr.com/services/apps>"
+            "flickr", "For interfacing with Flickr API <https://www.flickr.com/services/apps>"
         )
         flickr_grp.add_argument(
             "--flickr-key",
@@ -238,16 +252,9 @@ class Config(argparse.Namespace):
             help="Flickr API key",
             metavar="KEY",
         )
-        # flickr_grp.add_argument(
-        #     "--flickr-secret",
-        #     required=True,
-        #     help="Flickr API secret",
-        #     metavar="SECRET",
-        #     type=_maskedstr,
-        # )
 
         imgur_grp = parser.add_argument_group(
-            "Imgur", "For interfacing with Imgur API <https://imgur.com/account/settings/apps>"
+            "imgur", "For interfacing with Imgur API <https://imgur.com/account/settings/apps>"
         )
         imgur_grp.add_argument(
             "--imgur-client-id",
@@ -255,20 +262,13 @@ class Config(argparse.Namespace):
             help="Imgur API client ID",
             metavar="CLIENT_ID",
         )
-        # imgur_grp.add_argument(
-        #     "--imgur-client-secret",
-        #     required=True,
-        #     help="Imgur API client secret",
-        #     metavar="SECRET",
-        #     type=_maskedstr,
-        # )
 
         db_grp = parser.add_argument_group("database")
         db_grp.add_argument(
             "--db",
             default=DB_NAME,
             help="SQLite database file",
-            type=relative_path,
+            type=_relative_path,
             metavar="FILEPATH",
             dest="database",
         )
@@ -279,16 +279,42 @@ class Config(argparse.Namespace):
         )
 
         other_grp = parser.add_argument_group("other options")
-        other_grp.add_argument(
-            "--print-config", action="store_true", help="Show the config and exit"
-        )
         other_grp.add_argument("--help", "-h", "-?", action="help", help="Show help text and exit")
         other_grp.add_argument(
             "--version",
-            "-v",
             action="version",
             help="Show program's version number and exit",
             version="v" + __version__,
+        )
+
+        return parser
+
+
+class CLIConfig(Config):
+    print_config: bool
+    logging_config: dict
+
+    def print(self):
+        configdict = vars(self)
+        longestklen = max(len(k) for k in configdict.keys())
+        for k, v in configdict.items():
+            print(f"{k:<{longestklen}} = {v!r}")
+
+    @classmethod
+    def create_parser(cls) -> configargparse.ArgumentParser:
+        parser = super().create_parser()
+
+        other_grp = next(filter(lambda g: g.title == "other options", parser._action_groups))
+        other_grp.add_argument(
+            "--logging",
+            "-l",
+            help="JSON-formatted configuration for Python logging passed to logging.config.dictConfig <https://docs.python.org/3/library/logging.config.html#dictionary-schema-details>",
+            type=_logging_config,
+            metavar="JSON",
+            dest="logging_config",
+        )
+        other_grp.add_argument(
+            "--print-config", action="store_true", help="Show the config and exit"
         )
 
         return parser

@@ -20,6 +20,7 @@ class ImageResult(enum.Enum):
 
 class PostResult(enum.Enum):
     LARGER = ImageResult.LARGER.value
+    MODPOST = "MODERATOR"
     NO_RESOLUTION = "NO RESOLUTION IN TITLE"
     SMALLER = ImageResult.SMALLER.value
     UNSUPPORTED_MEDIA_TYPE = ImageResult.UNSUPPORTED_MEDIA_TYPE.value

@@ -1,4 +1,4 @@
-import datetime, logging, sys, typing as t
+import base64, datetime, logging, pathlib, sys, threading, typing as t
 
 import praw
 import bs4
@@ -7,24 +7,28 @@ import requests
 
 from .config import Config
 from .const import *
-from .database import DB, Submission, Image
+from .database import *
 from .exceptions import *
 from .external_links.imgur import Imgur
 from .external_links.flickr import Flickr
 from .logging_ import PrefixAdapter
-from .responses import make_response
+from .responses import Responder
 from .util import count
 
 
 __version__ = "0.1.0"
 
 
+_MAX_RESULT_LENGTH = max(len(x.value) for x in PostResult.__members__.values())
+
+
 class App:
-    def __init__(self, config: Config, log: logging.Logger):
+    def __init__(self, config: Config, log: logging.Logger = None):
         self.config = config
-        self.log = log
+        self.log = log or logging.getLogger("app")
         self.session = requests.Session()
-        user_agent = f"script:{APP_NAME}:v{__version__} (Python {sys.version})"
+        author = base64.b64decode(b"ZG9vbWJveTEwMDA=").decode("utf-8")
+        user_agent = f"script:{APP_NAME}:v{__version__} (Python {sys.version}) (by /u/{author})"
         self.session.headers.update({"User-Agent": user_agent})
         self.log.info("Initializing connection to reddit")
         self.reddit = self.make_praw(
@@ -36,12 +40,33 @@ class App:
             **self.config.praw_config or {},
         )
         self.subreddit: praw.reddit.Subreddit = self.reddit.subreddit(self.config.subreddit)
+        self.moderators = set(x.name for x in self.subreddit.moderator())
+        self.responder = Responder(self.config.subreddit)
         self.log.info(f"Reddit initialized read-only={self.reddit.read_only}")
         self.rezzes = self.get_rezzes()
+        self._colorama_initted = False
+        self._colorama_init_lock = threading.RLock()
+
+    def colored(self, color: str, msg: t.Any) -> str:
+        msg = str(msg)
+        if not self.config.color:
+            return msg
+
+        try:
+            import colorama
+        except ImportError:
+            return msg
+
+        with self._colorama_init_lock:
+            if not self._colorama_initted:
+                colorama.init()
+                self._colorama_initted = True
+            return getattr(colorama.Fore, color.upper(), "") + msg + colorama.Style.RESET_ALL
 
     def get_rezzes(self) -> list[Resolution]:
         """
         Read the HTML of <https://www.reddit.com/r/wallpaper/wiki/resolutions>
+        and return a list of supported resolutions
         """
         page = self.subreddit.wiki["resolutions"]
         bs = bs4.BeautifulSoup(page.content_html, "html.parser")
@@ -76,12 +101,24 @@ class App:
         return rezzes
 
     def run(self):
+        self.init_db()
+
         if self.config.posts:
             self._run_specific(*self.config.posts)
             return
 
         self._run_loop()
         return
+
+    def init_db(self):
+        DB.configure(self.config.database)
+        db_filepath = pathlib.Path(self.config.database)
+        if not db_filepath.parent.exists():
+            db_filepath.parent.mkdir(parents=True, exist_ok=True)
+        if self.config.drop:
+            self.log.info(f"Dropping and recreating database {self.config.database!r}")
+            drop_all()
+            create_all()
 
     def _run_loop(self):
         msg: str
@@ -141,89 +178,128 @@ class App:
                 self.check_submission(post)
 
     def check_submission(self, post: praw.reddit.Submission):
+        """
+        Standard output:
+        ```
+        YYYY-mm-dd HH:MM:SS,SSS - INFO    - [√] VALID               - https://www.reddit.com/r/wallpaper/comments/1a2b3c4d/title_here_1920x1080/
+        ```
+        Verbose output:
+        ```
+        YYYY-mm-dd HH:MM:SS,SSS - INFO    - 1a2b3c4d - Title: 'Title here [1920x1080]'
+        YYYY-mm-dd HH:MM:SS,SSS - INFO    - 1a2b3c4d - Submitted: YYYY-mm-dd HH:MM:SS
+        YYYY-mm-dd HH:MM:SS,SSS - INFO    - 1a2b3c4d - Domain: i.redd.it
+        YYYY-mm-dd HH:MM:SS,SSS - INFO    - 1a2b3c4d - Resolution (title): 1920x1080
+        YYYY-mm-dd HH:MM:SS,SSS - INFO    - 1a2b3c4d - Image submission
+        YYYY-mm-dd HH:MM:SS,SSS - INFO    - 1a2b3c4d - └─ Resolution (JPEG image): 1920x1080
+        YYYY-mm-dd HH:MM:SS,SSS - INFO    - 1a2b3c4d - [√] VALID
+        ```
+        """
         log = PrefixAdapter(self.log, f"{post.id:<7} -")
 
-        submission = Submission.from_post(post)
+        submission = Submission.from_post(post, self.rezzes)
         dt_submitted = submission.dateSubmitted.astimezone().replace(tzinfo=None)
-        log.info(f"Title: {submission.title!r}")
-        log.info(f"Submitted: {dt_submitted}")
-        log.info(f"Domain: {submission.domain}")
+        permalink = post._reddit.config.reddit_url + post.permalink
+        if self.config.verbose > 0:
+            log.info(f"Title: {submission.title!r}")
+            log.info(f"Submitted: {dt_submitted:%Y-%m-%d %H:%M:%S}")
+            log.info(f"Domain: {submission.domain}")
 
         existing_submission = (
             DB.query(Submission).filter(Submission.postID == submission.postID).first()
         )
         if existing_submission:
             dt_processed = existing_submission.dateProcessed.astimezone().replace(tzinfo=None)
-            log.info(f"⏭  SKIPPED - Already processed on {dt_processed}")
+            if self.config.verbose > 0:
+                log.info(
+                    self.colored("blue", f"[\u2192] SKIPPED")
+                    + f" - Already processed on {dt_processed:%Y-%m-%d %H:%M:%S}"
+                )
+            else:
+                log.info(
+                    self.colored("blue", f"[\u2192] {'SKIPPED':<{_MAX_RESULT_LENGTH}}")
+                    + f" - {permalink}"
+                )
             return
 
-        try:
-            if not submission.res:
-                raise PostResultError(PostResult.NO_RESOLUTION)
-            good_submission_rezzes = list(self.good_rezzes(submission))
-            if not len(good_submission_rezzes):
-                raise PostResultError(PostResult.UNSUPPORTED_RES)
-
-            image_urls, special_type = self.get_image_urls(post, log)
-
-            rezzes_str = ", ".join(f"{x}×{y}" for x, y in submission.res)
-            log.info(f"Resolution (title): {rezzes_str}")
-            if isinstance(image_urls, str):
-                logmsg = "Image submission"
-                if special_type:
-                    logmsg += f" ({special_type})"
-                log.info(logmsg)
-                submission.type = PostType.IMAGE
-                self.check_image(submission, image_urls, log)
-            else:
-                logmsg = "Gallery submission"
-                if special_type:
-                    logmsg += f" ({special_type})"
-                logmsg += f" ({count(image_urls, 'image')})"
-                log.info(logmsg)
-                submission.type = PostType.GALLERY
-                for image_url in image_urls:
-                    self.check_image(submission, image_url, log)
-        except PostResultError as exc:
-            submission.result = exc.postresult
+        if submission.author in self.moderators:
             submission.type = PostType.UNKNOWN
+            submission.result = PostResult.MODPOST
         else:
-            # Each successive element has higher priority than the last, i.e. ImageResult.SMALLER trumps all.
-            hierarchy = {
-                ImageResult.VALID: 0,
-                ImageResult.LARGER: 1,
-                ImageResult.UNSUPPORTED_MEDIA_TYPE: 2,
-                ImageResult.SMALLER: 3,
-            }
-            submission.result = PostResult.VALID
-            for i in submission.images:
-                # Convert PostResult to ImageResult
-                current_score = hierarchy[ImageResult(submission.result.value)]
-                new_score = hierarchy[i.result]
-                if new_score > current_score:
-                    # Convert ImageResult to PostResult
-                    submission.result = PostResult(i.result.value)
+            try:
+                if not submission.res:
+                    raise PostResultError(PostResult.NO_RESOLUTION)
+                if not len(submission.good_rezzes):
+                    raise PostResultError(PostResult.UNSUPPORTED_RES)
+
+                image_urls, special_type = self.get_image_urls(post, log)
+
+                rezzes_str = ", ".join(f"{x}×{y}" for x, y in submission.res)
+                if self.config.verbose > 0:
+                    log.info(f"Resolution (title): {rezzes_str}")
+                if isinstance(image_urls, str):
+                    if self.config.verbose > 0:
+                        logmsg = "Image submission"
+                        if special_type:
+                            logmsg += f" ({special_type})"
+                        log.info(logmsg)
+                    submission.type = PostType.IMAGE
+                    self.check_image(submission, image_urls, None, log)
+                else:
+                    if self.config.verbose > 0:
+                        logmsg = "Gallery submission"
+                        if special_type:
+                            logmsg += f" ({special_type})"
+                        logmsg += f" ({count(image_urls, 'image')})"
+                        log.info(logmsg)
+                    submission.type = PostType.GALLERY
+                    num_images = len(image_urls)
+                    for i, image_url in enumerate(image_urls):
+                        self.check_image(submission, image_url, (i + 1) / num_images, log)
+            except PostResultError as exc:
+                submission.result = exc.postresult
+                submission.type = PostType.UNKNOWN
+            else:
+                # Each successive element has higher priority than the last, i.e. ImageResult.SMALLER trumps all.
+                hierarchy = {
+                    ImageResult.VALID: 0,
+                    ImageResult.LARGER: 1,
+                    ImageResult.UNSUPPORTED_MEDIA_TYPE: 2,
+                    ImageResult.SMALLER: 3,
+                }
+                submission.result = PostResult.VALID
+                for i in submission.images:
+                    # Convert PostResult to ImageResult
+                    current_score = hierarchy[ImageResult(submission.result.value)]
+                    new_score = hierarchy[i.result]
+                    if new_score > current_score:
+                        # Convert ImageResult to PostResult
+                        submission.result = PostResult(i.result.value)
 
         submission.dateProcessed = datetime.datetime.now(tz=datetime.timezone.utc)
 
-        color = ""
-        if submission.result is PostResult.VALID:
-            color = "✅"
-        elif submission.result is PostResult.LARGER:
-            color = "🟨"
-        elif submission.result is PostResult.UNSUPPORTED_MEDIA_TYPE:
-            color = "⏭"
-        else:
-            color = "🟥"
+        char, color = (
+            {
+                PostResult.MODPOST: ("M", "blue"),
+                PostResult.VALID: ("\u221A", "green"),  # Square root symbol
+                PostResult.LARGER: ("!", "yellow"),
+                PostResult.UNSUPPORTED_MEDIA_TYPE: ("?", "white"),
+            }
+        ).get(submission.result, ("X", "red"))
 
         self.respond(submission)
-        log.info(f"{color} {submission.result.value}")
+        if self.config.verbose > 0:
+            log.info(self.colored(color, f"[{char}] {submission.result.value}"))
+        else:
+            log.info(
+                self.colored(color, f"[{char}] {submission.result.value:<{_MAX_RESULT_LENGTH}}")
+                + f" - {post._reddit.config.reddit_url}{post.permalink}"
+            )
 
         DB.add(submission)
         DB.commit()
 
     def respond(self, submission: Submission):
-        response_text = make_response(submission)
+        response_text = self.responder.make_response(submission)
         if response_text is None:
             # Don't do anything for any other results (i.e. VALID or unsupported things)
             return
@@ -243,23 +319,6 @@ class App:
         # TODO: Swap this out for a permalink of the stickied comment
         # once commenting has been implemented
         submission.response = response_text
-
-    def good_rezzes(self, submission: Submission) -> t.Iterator[Resolution]:
-        """
-        Yield all the KNOWN GOOD resolutions from the resolutions in the title
-        """
-
-        for w, h in submission.res:
-            # If user is submitting a dual monitor wallpaper, they might put "[3840 x 1080]" in the
-            # title, which isn't an accepted resolution. Half-width, e.g. 1920x1080, is. So check
-            # for half and third widths.
-            res_variants = [
-                (w, h),
-                (w // 2, h),
-                (w // 3, h),
-            ]
-            if any(r in self.rezzes for r in res_variants):
-                yield (w, h)
 
     def get_image_urls(
         self, post: praw.reddit.Submission, log: logging.Logger = None
@@ -301,10 +360,21 @@ class App:
             raise PostResultError(PostResult.UNSUPPORTED_TYPE_OR_LINK)
 
     def check_image(
-        self, submission: Submission, image_url: str, log: logging.Logger = None
+        self,
+        submission: Submission,
+        image_url: str,
+        index_pct: t.Union[int, None] = None,
+        log: logging.Logger = None,
     ) -> Image:
         if log is None:
             log = self.log
+
+        if index_pct == 1.0 or index_pct is None:
+            log_prefix = "└─"
+            log_prefix_debug = "   └─"
+        else:
+            log_prefix = "├─"
+            log_prefix_debug = "│  └─"
 
         image = Image(postID=submission.postID, url=image_url)
         submission.images.append(image)
@@ -313,32 +383,38 @@ class App:
             pimage = PImage.open(image_resp.raw, formats=SUPPORTED_FORMATS)
         except UnidentifiedImageError:
             image.result = ImageResult.UNSUPPORTED_MEDIA_TYPE
-            log.warning(f"Unsupported MimeType {image_resp.headers['Content-Type']!r}")
+            log.warning(f"{log_prefix} Unsupported MimeType {image_resp.headers['Content-Type']!r}")
             return image
 
         image.x = pimage.width
         image.y = pimage.height
         image.format = pimage.format
         image.result = ImageResult.VALID
-        log.info(f"Resolution ({pimage.format} image): {pimage.width}×{pimage.height}")
+        if self.config.verbose > 0:
+            log.info(
+                f"{log_prefix} Resolution ({pimage.format} image): {pimage.width}×{pimage.height}"
+            )
 
-        good_rezzes = set(self.good_rezzes(submission))
         # Oh no, we're going to have a mismatch of some sort
-        if (image.x, image.y) not in good_rezzes:
+        if (image.x, image.y) not in submission.good_rezzes:
             # Image needs to be at least as big (in both dimensions) as ONE of the resolutions in the post title
             satisfied = False
-            for x, y in good_rezzes:
+            for x, y in submission.good_rezzes:
                 if image.x >= x and image.y >= y:
-                    log.debug(f"Image ({image.x}×{image.y}) at least as big as title's ({x}×{y})")
+                    log.debug(
+                        f"{log_prefix_debug} Image ({image.x}×{image.y}) at least as big as title's ({x}×{y})"
+                    )
                     satisfied = True
                 else:
-                    log.debug(f"Image ({image.x}×{image.y}) is smaller than title's ({x}×{y})")
+                    log.debug(
+                        f"{log_prefix_debug} Image ({image.x}×{image.y}) is smaller than title's ({x}×{y})"
+                    )
             if satisfied > 0:
                 image.result = ImageResult.LARGER
             else:
                 image.result = ImageResult.SMALLER
         else:
-            log.debug(f"Image ({image.x}×{image.y}) matches title resolution")
+            log.debug(f"{log_prefix_debug} Image ({image.x}×{image.y}) matches title resolution")
 
         return image
 

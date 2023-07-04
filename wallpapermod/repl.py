@@ -1,14 +1,14 @@
-import code, csv, datetime, logging
+import code, logging
 
 PER_PAGE = 100
 
 if __name__ == "__main__":
-    from wallpapermod import _BaseApp
+    from wallpapermod import App
 
     logging.basicConfig(format="%(asctime)s - %(levelname)-8s - %(message)s", level=logging.INFO)
     log = logging.getLogger()
 
-    app = _BaseApp(log)
+    app = App(log)
     code.interact(banner="", local=locals())
 
     # with open("bans.txt", "wb") as file:

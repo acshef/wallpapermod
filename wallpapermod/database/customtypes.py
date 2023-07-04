@@ -20,6 +20,9 @@ class Rezzes(types.TypeDecorator):
 
     def process_result_value(self, value: str, dialect):
         rezzes = list[Resolution]()
+        if not value:
+            return rezzes
+
         for res_str in str(value).split(","):
             x, y, *_ = res_str.split("x")
             rezzes.append((int(x), int(y)))
